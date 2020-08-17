@@ -1,0 +1,1 @@
+D:\go_open_source\baidu10\baidu10.exe -p 10 -w "ËÑË÷Ê²Ã´" -s 

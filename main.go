@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"github.com/360EntSecGroup-Skylar/excelize/v2"
 	"github.com/PuerkitoBio/goquery"
+	"github.com/chromedp/cdproto/emulation"
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 	"io/ioutil"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -21,13 +24,13 @@ import (
 const Sheet1 = "Sheet1"
 const baiduUrl = "https://www.baidu.com"
 
-var page = 3
+var _page = 3
 var wrod = ""
 var openChrome bool
 var outFileName string
 
 func init() {
-	flag.IntVar(&page, "p", page, "要获取的总页数,默认: 3")
+	flag.IntVar(&_page, "p", _page, "要获取的总页数,默认: 3")
 	flag.StringVar(&wrod, "w", wrod, "要搜索的关键词,不能为空")
 	flag.BoolVar(&openChrome, "s", openChrome, "是否隐藏浏览器 默认false不隐藏")
 	flag.StringVar(&outFileName, "o", outFileName, "保存文件名,默认当前时间20200701T010101")
@@ -41,6 +44,10 @@ func main() {
 	if strings.ToLower(path.Ext(outFileName)) != ".xlsx" {
 		outFileName = outFileName + ".xlsx"
 	}
+
+	//获取不带后缀的文件名
+	fileName := strings.TrimSuffix(outFileName, ".xlsx")
+
 	if strings.TrimSpace(wrod) == "" {
 		log.Fatalln("搜索内容不能为容")
 	}
@@ -48,9 +55,10 @@ func main() {
 	rowIndex := 1 //行
 	excelFile := excelize.NewFile()
 	index := excelFile.NewSheet(Sheet1) // 创建一个工作表
-	excelFile.SetCellValue(Sheet1, ExcelPos(colIndex+0, rowIndex), "标题")
-	excelFile.SetCellValue(Sheet1, ExcelPos(colIndex+1, rowIndex), "url")
-	excelFile.SetCellValue(Sheet1, ExcelPos(colIndex+2, rowIndex), "描述")
+	excelFile.SetCellValue(Sheet1, ExcelPos(colIndex+0, rowIndex), "页码")
+	excelFile.SetCellValue(Sheet1, ExcelPos(colIndex+1, rowIndex), "标题")
+	excelFile.SetCellValue(Sheet1, ExcelPos(colIndex+2, rowIndex), "url")
+	excelFile.SetCellValue(Sheet1, ExcelPos(colIndex+3, rowIndex), "描述")
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.DisableGPU,
@@ -70,7 +78,10 @@ func main() {
 
 	// navigate to a page, wait for an element, click
 
-	log.Printf("第%d页\n", 1)
+	pageCode := 1 //页码
+	log.Printf("第%d页\n", pageCode)
+
+	var ScreenshotBuf []byte //图片缓冲区
 
 	var contentLeft string
 	var pageHTML string //页码列表
@@ -80,15 +91,22 @@ func main() {
 		chromedp.Click(".s_btn", chromedp.NodeVisible, chromedp.ByQuery),                          // 点击搜索图标
 		chromedp.OuterHTML("#content_left", &contentLeft, chromedp.NodeVisible, chromedp.ByQuery), //获取内容
 		chromedp.OuterHTML("#page", &pageHTML, chromedp.NodeVisible, chromedp.ByQuery),
+		chromedp.ActionFunc(cbMaxScreen),
+		chromedp.Screenshot("body", &ScreenshotBuf, chromedp.NodeVisible, chromedp.ByQuery),
 	); err != nil {
 		log.Fatal("执行失败", err)
 	}
-	//fmt.Println(contentLeft)
-	GetOnepage(contentLeft, &colIndex, &rowIndex, excelFile) //抓取内容写入excel
 
-	page = page - 1
-	for i := 0; i < page; i++ {
-		log.Printf("第%d页\n", i+2)
+	//保存截图
+	saveScreen(fileName+"_"+strconv.Itoa(pageCode), ScreenshotBuf)
+
+	//fmt.Println(contentLeft)
+	GetOnepage(contentLeft, pageCode, &colIndex, &rowIndex, excelFile) //抓取内容写入excel
+
+	_page = _page - 1
+	for i := 0; i < _page; i++ {
+		pageCode = i + 2
+		log.Printf("第%d页\n", pageCode)
 		jqdom, err := goquery.NewDocumentFromReader(strings.NewReader(pageHTML))
 		if err != nil {
 			log.Fatalln("创建jqdom失败")
@@ -100,8 +118,10 @@ func main() {
 				chromedp.Navigate(baiduUrl+nextUrl),
 				chromedp.OuterHTML("#content_left", &contentLeft, chromedp.NodeVisible, chromedp.ByQuery), //获取内容
 				chromedp.OuterHTML("#page", &pageHTML, chromedp.NodeVisible, chromedp.ByQuery),
+				chromedp.Screenshot("body", &ScreenshotBuf, chromedp.NodeVisible, chromedp.ByQuery),
 			)
-			GetOnepage(contentLeft, &colIndex, &rowIndex, excelFile) //抓取内容写入excel
+			saveScreen(fileName+"_"+strconv.Itoa(pageCode), ScreenshotBuf)     //保存截图
+			GetOnepage(contentLeft, pageCode, &colIndex, &rowIndex, excelFile) //抓取内容写入excel
 		}
 	}
 
@@ -116,7 +136,7 @@ func main() {
 }
 
 //抓取内容写入excel
-func GetOnepage(contentLeft string, colIndex, rowIndex *int, f *excelize.File) {
+func GetOnepage(contentLeft string, pageCode int, colIndex, rowIndex *int, f *excelize.File) {
 	jqdom, err := goquery.NewDocumentFromReader(strings.NewReader(contentLeft))
 	if err != nil {
 		log.Fatalln("创建jqdom失败")
@@ -143,13 +163,16 @@ func GetOnepage(contentLeft string, colIndex, rowIndex *int, f *excelize.File) {
 			}
 		}
 		*rowIndex++
-		if err := f.SetCellValue(Sheet1, ExcelPos(*colIndex+0, *rowIndex), title); err != nil {
+		if err := f.SetCellValue(Sheet1, ExcelPos(*colIndex+0, *rowIndex), pageCode); err != nil {
 			log.Println("写入失败", err)
 		}
-		if err := f.SetCellValue(Sheet1, ExcelPos(*colIndex+1, *rowIndex), u); err != nil {
+		if err := f.SetCellValue(Sheet1, ExcelPos(*colIndex+1, *rowIndex), title); err != nil {
 			log.Println("写入失败", err)
 		}
-		if err := f.SetCellValue(Sheet1, ExcelPos(*colIndex+2, *rowIndex), content); err != nil {
+		if err := f.SetCellValue(Sheet1, ExcelPos(*colIndex+2, *rowIndex), u); err != nil {
+			log.Println("写入失败", err)
+		}
+		if err := f.SetCellValue(Sheet1, ExcelPos(*colIndex+3, *rowIndex), content); err != nil {
 			log.Println("写入失败", err)
 		}
 	})
@@ -205,4 +228,33 @@ func AZ26(i int) string {
 //列是从0开始 行是从1开始
 func ExcelPos(col int, row int) string {
 	return strings.Join([]string{AZ26(col), strconv.Itoa(row)}, "")
+}
+
+//回调函数 强制视口仿真 (模拟一个宽=width 高=height 的大屏幕)
+func cbMaxScreen(ctx context.Context) error {
+
+	//返回与页面布局相关的度量，例如视口边界/比例。
+	_, _, contentSize, err := page.GetLayoutMetrics().Do(ctx)
+	if err != nil {
+		return err
+	}
+
+	//获取页面宽高,包含非可视区域
+	width, height := int64(math.Ceil(contentSize.Width)), int64(math.Ceil(contentSize.Height))
+
+	// force viewport emulation 强制视口仿真 (模拟一个宽=width 高=height 的大屏幕)
+	if err := emulation.SetDeviceMetricsOverride(width, height, 1, false).WithScreenOrientation(&emulation.ScreenOrientation{
+		Type:  emulation.OrientationTypePortraitPrimary,
+		Angle: 0,
+	}).Do(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+//保存截图
+func saveScreen(fileName string, buf []byte) {
+	if err := ioutil.WriteFile(fileName+".png", buf, 0644); err != nil {
+		log.Fatal(err)
+	}
 }
